@@ -1,14 +1,19 @@
 {
-  "name": "allanpichardo/mysql-vector",
-  "description": "Perform vector operations natively on MySQL",
+  "name": "mindfulcoder49/mysql-vector-openai",
+  "description": "Perform vector operations natively on MySQL using openAI embeddings",
   "type": "library",
   "license": "MIT",
-  "version": "2.0.1",
+  "version": "1.0.0",
   "authors": [
     {
       "name": "Allan Pichardo",
       "email": "allan.pichardo@gmail.com",
       "homepage": "https://allanpichardo.com"
+    },
+    {
+      "name": "Alex Alcivar",
+      "email": "alex.g.alcivar49@gmail.com",
+      "homepage": "https://alcivartech.com"
     }
   ],
   "require": {
@@ -22,8 +27,7 @@
     "ext-ctype": "*",
     "symfony/polyfill-ctype": "^1.28",
     "ext-iconv": "*",
-    "symfony/polyfill-iconv": "^1.28",
-    "ankane/onnxruntime": "^0.2.1"
+    "symfony/polyfill-iconv": "^1.28"
   },
   "replace": {
     "symfony/polyfill-intl-normalizer": "^1.28",

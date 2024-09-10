@@ -1,81 +1,86 @@
 <?php
-
 namespace MHz\MysqlVector\Nlp;
 
-use OnnxRuntime\Model;
-use OnnxRuntime\Vendor;
+use GuzzleHttp\Client;
 
 class Embedder
 {
-    private Model $model;
-    private BertTokenizer $tokenizer;
-
-    const QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:";
     const EMBEDDING_DIMENSIONS = 384;
     const MAX_LENGTH = 512;
+    const OPENAI_API_URL = 'https://api.openai.com/v1/embeddings';
+    private $apiKey;
 
-    public function __construct() {
-        // check if onnxruntime is installed
-        ob_start();
-        Vendor::check();
-        ob_end_clean();
-
-        // load model
-        $this->model = new Model(__DIR__ . '/model_quantized.onnx');
-
-        // load tokenizer configuration
-        $tokenizerConfig = json_decode(file_get_contents(__DIR__ . '/tokenizer_config.json'), true);
-        $tokenizerJSON = json_decode(file_get_contents(__DIR__ . '/tokenizer.json'), true);
-
-        // load BertTokenizer
-        $this->tokenizer = new BertTokenizer($tokenizerJSON, $tokenizerConfig);
-    }
-
-    public function getInputs(): array {
-        return $this->model->inputs();
-    }
-
-    public function getOutputs(): array {
-        return $this->model->outputs();
+    public function __construct()
+    {
+        // Set your OpenAI API key (assumed to be stored in an environment variable)
+        $this->apiKey = env('OPENAI_API_KEY');
+        
+        if (!$this->apiKey) {
+            throw new \Exception("OpenAI API key is missing. Please set it in the environment.");
+        }
     }
 
     /**
-     * Returns the number of dimensions of the output vector.
-     * @return int
-     */
-    public function getDimensions(): int {
-        return $this->model->outputs()[0]['shape'][2];
-    }
-
-    /**
-     * Calculates the embedding of a text.
+     * Calculates the embedding of a text using OpenAI Embeddings API.
      * @param array $text Batch of text to embed
      * @return array Batch of embeddings
      * @throws \Exception
      */
-    public function embed(array $text, bool $prependQuery = false): array {
+    public function embed(array $text): array
+    {
+        $client = new Client();
 
-        if($prependQuery) {
-            // Add query instruction to text
-            $text = array_map(function($t) {
-                return self::QUERY_INSTRUCTION . ' ' . $t;
-            }, $text);
-        }
+        // Prepare the request body
+        $body = [
+            'model' => 'text-embedding-ada-002', // OpenAI embedding model
+            'input' => $text
+        ];
 
-        $tokens = $this->tokenizer->call($text, [
-            'text_pair' => null,
-            'add_special_tokens' => true,
-            'padding' => true,
-            'truncation' => true,
-            'max_length' => null,
-            'return_tensor' => false
+        // Make the API request
+        $response = $client->post(self::OPENAI_API_URL, [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $this->apiKey,
+                'Content-Type' => 'application/json',
+            ],
+            'json' => $body
         ]);
 
-        $outputs = $this->model->predict($tokens, outputNames: ['last_hidden_state']);
-        return $outputs['last_hidden_state'];
+        // Parse the response
+        $responseBody = json_decode($response->getBody(), true);
+
+        if (isset($responseBody['error'])) {
+            throw new \Exception('OpenAI API error: ' . $responseBody['error']['message']);
+        }
+
+        // Extract embeddings
+        $embeddings = array_map(function($result) {
+            return $result['embedding'];
+        }, $responseBody['data']);
+
+        return $embeddings;
     }
 
-    private function dotProduct(array $a, array $b): float {
+    /**
+     * Calculates the cosine similarity between two vectors.
+     * @param array $a
+     * @param array $b
+     * @return float
+     */
+    public function getCosineSimilarity(array $a, array $b): float
+    {
+        return 1.0 - $this->cosine($a, $b);
+    }
+
+    private function cosine(array $a, array $b): float
+    {
+        $dotproduct = $this->dotProduct($a, $b);
+        $normA = $this->l2Norm($a);
+        $normB = $this->l2Norm($b);
+        return $dotproduct / ($normA * $normB);
+    }
+
+    private function dotProduct(array $a, array $b): float
+    {
         return \array_sum(\array_map(
             function ($a, $b) {
                 return $a * $b;
@@ -85,28 +90,10 @@ class Embedder
         ));
     }
 
-    private function l2Norm(array $a): float {
-        return \sqrt(\array_sum(\array_map(function($x) { return $x * $x; }, $a)));
-    }
-
-    private function cosine(array $a, array $b): float {
-        $dotproduct = $this->dotProduct($a, $b);
-        $normA = $this->l2Norm($a);
-        $normB = $this->l2Norm($b);
-        return 1.0 - ($dotproduct / ($normA * $normB));
-    }
-
-    /**
-     * Calculates the cosine similarity between two vectors.
-     * @param array $a
-     * @param array $b
-     * @return float
-     */
-    public function getCosineSimilarity(array $a, array $b): float {
-        return 1.0 - $this->cosine($a, $b);
-    }
-
-    public function getMaxLength(): int {
-        return $this->tokenizer->modelMaxLength;
+    private function l2Norm(array $a): float
+    {
+        return \sqrt(\array_sum(\array_map(function ($x) {
+            return $x * $x;
+        }, $a)));
     }
 }
