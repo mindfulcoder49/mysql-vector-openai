@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "9872ad49da31072e448a70f23c5d0f71",
+    "content-hash": "34c2dc523928b2ceb099da46eff04d32",
     "packages": [
         {
             "name": "bdelespierre/php-kmeans",
