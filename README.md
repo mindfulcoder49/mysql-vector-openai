@@ -1,108 +1,209 @@
-# A Library for MySQL Vector Operations and Text Embeddings
+Here's a `README.md` file that reflects the current functionality of your `VectorTable` class.
 
-## Overview
-The `VectorTable` class is a PHP implementation designed to facilitate the storage, retrieval, and comparison of high-dimensional vectors in a MySQL database. This class utilizes MySQL JSON data types and a custom cosine similarity function (`COSIM`) to perform vector comparisons efficiently. 
+```markdown
+# MySQL Vector Table
 
-### Search Performance
-Vectors are binary quantized upon insertion into the database to optimize search speed and reranked to improve accuracy.
-However, this library is only suitable for small datasets (less than 1,000,000 vectors). For large datasets, it is recommended that you use a dedicated vector database such as [Qdrant](https://qdrant.tech/).
-
-Search Benchmarks (384-dimensional vectors):
-Vectors | Time (seconds)
---------|---------------
-100     | 0.02
-1000    | 0.02
-10000   | 0.03
-100000  | 0.06
-1000000 | 0.48
+This repository provides an implementation for storing, searching, and manipulating vectors in a MySQL database using cosine similarity and binary codes for efficient search. The main class `VectorTable` provides a variety of functions to handle vector data, including inserting, updating, searching, and computing similarity between vectors.
 
 ## Features
-- Store vectors in a MySQL database using JSON data types.
-- Calculate cosine similarity between vectors using a custom MySQL function.
-- Normalize vectors and handle vector operations such as insertion, deletion, and searching.
-- Support for vector quantization for optimized search operations.
-- Native PHP support for generating for text embeddings using the [BGE embedding model](https://huggingface.co/BAAI/bge-base-en-v1.5).
 
-## Requirements
-- PHP 8.0 or higher.
-- MySQL 5.7 or higher with support for JSON data types and stored functions.
-- A MySQLi extension for PHP.
+- **Cosine Similarity Search (COSIM)**: Efficiently compute the cosine similarity between vectors stored as JSON in MySQL.
+- **Binary Code Representation**: Vectors are stored in binary form for efficient querying and similarity computation.
+- **Hamming Distance Search (Optional)**: A method for searching vectors based on Hamming distance is also available, though not the primary method.
+- **Vector Normalization**: Automatically normalizes vectors before inserting and computing similarity.
+- **Batch Insertion**: Support for inserting multiple vectors at once.
+- **Vector Management**: Functions to insert, update, delete, and retrieve vectors.
+  
+## Table Structure
 
-## Installation
-1. Ensure that PHP and MySQL are installed and properly configured on your system.
-2. Install the library using [Composer](https://getcomposer.org/).
-
-   ```bash
-   composer require allanpichardo/mysql-vector
-   ```
-
-## Usage
-
-### Initializing the Vector Table
-Import the `VectorTable` class and create a new instance using the MySQLi connection, table name, and vector dimension.
-```php
-use MHz\MysqlVector\VectorTable;
-
-
-$mysqli = new mysqli("hostname", "username", "password", "database");
-$tableName = "my_vector_table";
-$dimension = 384;
-$engine = 'InnoDB';
-
-$vectorTable = new VectorTable($mysqli, $tableName, $dimension, $engine);
+The vectors are stored in a MySQL table with the following structure:
+```sql
+CREATE TABLE `your_table_name_vectors` (
+    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `vector` JSON,                  -- The original vector
+    `normalized_vector` JSON,        -- The normalized vector
+    `magnitude` DOUBLE,              -- The magnitude of the vector
+    `binary_code` BLOB,              -- Binary representation of the vector for efficient searching
+    `created` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
 ```
 
-### Setting Up the Vector Table in MySQL
-The `initialize` method will create the vector table in MySQL if it does not already exist. This method will also create the `COSIM` function in MySQL if it does not already exist.
+## MySQL Function: `COSIM`
+
+The class defines a custom MySQL function `COSIM` to compute cosine similarity between two vectors stored as JSON.
+
+```sql
+CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC
+BEGIN
+    DECLARE sim FLOAT DEFAULT 0;
+    DECLARE i INT DEFAULT 0;
+    DECLARE len INT DEFAULT JSON_LENGTH(v1);
+    
+    IF JSON_LENGTH(v1) != JSON_LENGTH(v2) THEN RETURN NULL; END IF;
+    
+    WHILE i < len DO
+        SET sim = sim + (JSON_EXTRACT(v1, CONCAT('$[', i, ']')) * JSON_EXTRACT(v2, CONCAT('$[', i, ']')));
+        SET i = i + 1;
+    END WHILE;
+    
+    RETURN sim;
+END;
+```
+
+## Core Functionalities
+
+### `search()`
+
+Search for vectors in the table that are most similar to a given input vector based on cosine similarity.
+
+#### Usage:
+```php
+$results = $vectorTable->search($inputVector, $n = 10);
+```
+
+- **$inputVector**: The vector to compare against the stored vectors.
+- **$n**: The number of results to return (default is 10).
+
+The function returns an array of the most similar vectors sorted by cosine similarity.
+
+### `searchWithHamming()`
+
+Search for vectors in the table based on Hamming distance between binary representations of vectors.
+
+#### Usage:
+```php
+$results = $vectorTable->searchWithHamming($inputVector, $n = 10);
+```
+
+### `upsert()`
+
+Insert or update a vector in the table. If the vector already exists (based on ID), it will be updated. Otherwise, a new vector will be inserted.
+
+#### Usage:
+```php
+$id = $vectorTable->upsert($vector, $id = null);
+```
+
+- **$vector**: The vector to insert or update.
+- **$id**: The optional ID of the vector to update. If not provided, a new vector is inserted.
+
+### `batchInsert()`
+
+Insert multiple vectors into the table in a single transaction.
+
+#### Usage:
+```php
+$ids = $vectorTable->batchInsert($vectorArray);
+```
+
+- **$vectorArray**: An array of vectors to be inserted.
+
+### `select()`
+
+Retrieve vectors from the table by their IDs.
+
+#### Usage:
+```php
+$vectors = $vectorTable->select($ids);
+```
+
+- **$ids**: An array of vector IDs to retrieve.
+
+### `selectAll()`
+
+Retrieve all vectors from the table.
+
+#### Usage:
+```php
+$vectors = $vectorTable->selectAll();
+```
+
+### `delete()`
+
+Remove a vector from the table by its ID.
+
+#### Usage:
+```php
+$vectorTable->delete($id);
+```
+
+- **$id**: The ID of the vector to remove.
+
+### `normalize()`
+
+Normalize a vector by its magnitude.
+
+#### Usage:
+```php
+$normalizedVector = $vectorTable->normalize($vector);
+```
+
+- **$vector**: The vector to normalize.
+
+### `cosim()`
+
+Compute the cosine similarity between two vectors.
+
+#### Usage:
+```php
+$similarity = $vectorTable->cosim($v1, $v2);
+```
+
+- **$v1**: The first vector.
+- **$v2**: The second vector.
+
+### `count()`
+
+Get the total number of vectors stored in the database.
+
+#### Usage:
+```php
+$totalVectors = $vectorTable->count();
+```
+
+### `vectorToBinary()`
+
+Convert an n-dimensional vector into a binary code.
+
+#### Usage:
+```php
+$binaryCode = $vectorTable->vectorToBinary($vector);
+```
+
+## Initialization
+
+To create the necessary tables and functions, you need to call the `initialize()` method.
+
 ```php
 $vectorTable->initialize();
 ```
 
-### Inserting and Managing Vectors
-```php
-// Insert a new vector
-$vector = [0.1, 0.2, 0.3, ..., 0.384];
-$vectorId = $vectorTable->upsert($vector);
+This will create the vectors table and the cosine similarity function (`COSIM`) in your database.
 
-// Update an existing vector
-$vectorTable->upsert($vector, $vectorId);
+## Installation
 
-// Delete a vector
-$vectorTable->delete($vectorId);
-```
+1. Set up a MySQL database.
+2. Create an instance of the `VectorTable` class.
+3. Call `initialize()` to set up the table and functions.
+4. Start inserting, updating, and searching for vectors!
 
-### Calculating Cosine Similarity
-```php
-// Calculate cosine similarity between two vectors
-$similarity = $vectorTable->cosim($vector1, $vector2);
-```
-
-### Searching for Similar Vectors
-Perform a search for vectors similar to a given vector using the cosine similarity criteria. The `topN` parameter specifies the maximum number of similar vectors to return.
-```php
-// Find vectors similar to a given vector
-$similarVectors = $vectorTable->search($vector, $topN);
-```
-
-## Text Embeddings
-The `Embedder` class calculates 384-dimensional text embeddings using the [BGE embedding model](https://huggingface.co/BAAI/bge-base-en-v1.5). The first time you instanciate the `Embedder` class, the ONNX runtime will be installed automatically.
-The maximum length of the input text is 512 characters. The `Embedder` class will automatically truncate the input text to 512 characters if it is longer than 512 characters.
+### Example:
 
 ```php
-use MHz\MysqlVector\Nlp\Embedder;
+$mysqli = new \mysqli('localhost', 'user', 'password', 'database');
 
-$embedder = new Embedder();
+$vectorTable = new \MHz\MysqlVector\VectorTable($mysqli, 'example_table', 384);
+$vectorTable->initialize();
 
-// Calculate the embeddings for a batch of text
-$texts = ["Hello world!", "This is a test."];
-$embeddings = $embedder->embed($texts);
+$vector = [1, 2, 3, 4, 5];
+$vectorTable->upsert($vector);
 
-print_r($embeddings[0][0]); // [0.1, 0.2, 0.3, ..., 0.384]
-print_r($embeddings[1][0]); // [0.1, 0.2, 0.3, ..., 0.384]
+$similarVectors = $vectorTable->search($vector);
 ```
-
-## Contributions
-Contributions to this project are welcome. Please ensure that your code adheres to the existing coding standards and includes appropriate tests.
 
 ## License
-MIT License
+
+This project is licensed under the MIT License.
+```
+
+This `README.md` outlines the features, core functionalities, usage examples, and setup instructions for your `VectorTable` class. It reflects the current state of your code, including both cosine similarity and Hamming distance-based searches, and explains how to initialize, insert, search, and manage vectors in the MySQL database.

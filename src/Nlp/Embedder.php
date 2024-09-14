@@ -5,7 +5,7 @@ use GuzzleHttp\Client;
 
 class Embedder
 {
-    const EMBEDDING_DIMENSIONS = 384;
+    const EMBEDDING_DIMENSIONS = 256;
     const MAX_LENGTH = 512;
     const OPENAI_API_URL = 'https://api.openai.com/v1/embeddings';
     private $apiKey;
@@ -32,8 +32,9 @@ class Embedder
 
         // Prepare the request body
         $body = [
-            'model' => 'text-embedding-ada-002', // OpenAI embedding model
-            'input' => $text
+            'model' => 'text-embedding-3-small', // OpenAI embedding model
+            'input' => $text,
+            'dimensions' => self::EMBEDDING_DIMENSIONS,
         ];
 
         // Make the API request

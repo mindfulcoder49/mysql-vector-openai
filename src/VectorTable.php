@@ -4,6 +4,7 @@ namespace MHz\MysqlVector;
 
 use KMeans\Space;
 
+
 class VectorTable
 {
     private string $name;
@@ -39,21 +40,23 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
     }
 
     protected function getCreateStatements(bool $ifNotExists = true): array {
-        $binaryCodeLengthInBytes = ceil($this->dimension / 8);
-
+        // Update the binary code length to a CHAR field, with 384 characters (assuming 384 bits in the vector)
+        $binaryCodeLengthInChars = $this->dimension * 2; // Each byte is 2 hex chars
+    
         $vectorsQuery =
             "CREATE TABLE %s %s (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 vector JSON,
                 normalized_vector JSON,
                 magnitude DOUBLE,
-                binary_code BINARY(%d),
+                binary_code BLOB,
                 created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=%s;";
-        $vectorsQuery = sprintf($vectorsQuery, $ifNotExists ? 'IF NOT EXISTS' : '', $this->getVectorTableName(), $binaryCodeLengthInBytes, $this->engine);
-
+        $vectorsQuery = sprintf($vectorsQuery, $ifNotExists ? 'IF NOT EXISTS' : '', $this->getVectorTableName(), $this->engine);
+    
         return [$vectorsQuery];
     }
+    
 
     /**
      * Convert an n-dimensional vector in to an n-bit binary code
@@ -79,6 +82,38 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
         $hex = str_pad($hex, ceil(strlen($hex) / 4) * 4, '0', STR_PAD_LEFT);
         return $hex;
     }
+
+    /**
+     * Convert an n-dimensional vector into an n-bit binary code
+     * @param array $vector
+     * @return string (binary data)
+     */
+    public function vectorToBinary(array $vector): string {
+        $binary = '';
+        $bit = 0;
+        $char = 0;
+        
+        foreach ($vector as $value) {
+            if ($value > 0) {
+                $char |= 1 << $bit;
+            }
+
+            $bit++;
+            if ($bit === 8) { // Every 8 bits (1 byte), append the char to the binary string
+                $binary .= chr($char);
+                $bit = 0;
+                $char = 0;
+            }
+        }
+        
+        // If there are remaining bits that don't fill a complete byte, append them
+        if ($bit > 0) {
+            $binary .= chr($char);
+        }
+
+        return $binary; // Return the binary string
+    }
+
 
     /**
      * Create the tables required for storing vectors
@@ -154,12 +189,12 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
     {
         $magnitude = $this->getMagnitude($vector);
         $normalizedVector = $this->normalize($vector, $magnitude);
-        $binaryCode = $this->vectorToHex($normalizedVector);
+        $binaryCode = $this->vectorToBinary($normalizedVector);  // Convert to binary string
         $tableName = $this->getVectorTableName();
 
         $insertQuery = empty($id) ?
-            "INSERT INTO $tableName (vector, normalized_vector, magnitude, binary_code) VALUES (?, ?, ?, UNHEX(?))" :
-            "UPDATE $tableName SET vector = ?, normalized_vector = ?, magnitude = ?, binary_code = UNHEX(?) WHERE id = $id";
+            "INSERT INTO $tableName (vector, normalized_vector, magnitude, binary_code) VALUES (?, ?, ?, ?)" :
+            "UPDATE $tableName SET vector = ?, normalized_vector = ?, magnitude = ?, binary_code = ? WHERE id = $id";
 
         $statement = $this->mysqli->prepare($insertQuery);
         if(!$statement) {
@@ -171,7 +206,7 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
         $vector = json_encode($vector);
         $normalizedVector = json_encode($normalizedVector);
 
-        $statement->bind_param('ssds', $vector, $normalizedVector, $magnitude, $binaryCode);
+        $statement->bind_param('ssds', $vector, $normalizedVector, $magnitude, $binaryCode);  // Bind binary string directly
 
         $success = $statement->execute();
         if(!$success) {
@@ -183,6 +218,8 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
 
         return $id;
     }
+
+
 
     /**
      * Insert multiple vectors in a single query
@@ -340,24 +377,31 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
      * @return array Array of results containing the id, similarity, and vector
      * @throws \Exception
      */
-    public function search(array $vector, int $n = 10): array {
+    public function searchWithHamming(array $vector, int $n = 10): array {
         $tableName = $this->getVectorTableName();
         $normalizedVector = $this->normalize($vector);
-        $binaryCode = $this->vectorToHex($normalizedVector);
+        $binaryCode = $this->vectorToHex($normalizedVector);  // Already in hexadecimal
+    
+        // Initial search using binary codes (no need for HEX/UNHEX or CONVERT anymore)
+        $statement = $this->mysqli->prepare("
+            SELECT id, 
+                hamming_distance(binary_code, ?) AS hamming_distance 
+            FROM $tableName 
+            ORDER BY hamming_distance 
+            LIMIT ?
+        ");
+        $statement->bind_param('bi', $binaryCode, $n);  // 'b' is used for binary data binding, 'i' for integer
 
-        // Initial search using binary codes
-        $statement = $this->mysqli->prepare("SELECT id, BIT_COUNT(binary_code ^ UNHEX(?)) AS hamming_distance FROM $tableName ORDER BY hamming_distance LIMIT $n");
-        $statement->bind_param('s', $binaryCode);
-
+    
         if(!$statement) {
             $e = new \Exception($this->mysqli->error);
             $this->mysqli->rollback();
             throw $e;
         }
-
+    
         $statement->execute();
         $statement->bind_result($vectorId, $hd);
-
+    
         $candidates = [];
         while ($statement->fetch()) {
             $candidates[] = $vectorId;
@@ -406,6 +450,69 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
 
         return $results;
     }
+
+    public function search(array $vector, int $n = 10): array {
+
+
+        $tableName = $this->getVectorTableName();
+
+        $normalizedVector = $this->normalize($vector);  // Normalize the input vector
+
+
+        $normalizedVectorJson = json_encode($normalizedVector);  // Convert it to JSON
+
+
+        // Query using cosine similarity (COSIM)
+        $sql = "
+            SELECT id, vector, normalized_vector, magnitude, COSIM(normalized_vector, ?) AS similarity
+            FROM $tableName
+            ORDER BY similarity DESC
+            LIMIT ?
+        ";
+
+
+        // Prepare the SQL statement
+        $statement = $this->mysqli->prepare($sql);
+        
+        if (!$statement) {
+            $error = $this->mysqli->error;
+            throw new \Exception($error);
+        }
+
+
+
+        $statement->bind_param('si', $normalizedVectorJson, $n);
+
+
+        $statement->execute();
+
+        // Bind the result variables
+        $statement->bind_result($id, $v, $nv, $mag, $sim);
+
+
+        // Collect results
+        $results = [];
+        while ($statement->fetch()) {
+            $result = [
+                'id' => $id,
+                'vector' => json_decode($v, true),
+                'normalized_vector' => json_decode($nv, true),
+                'magnitude' => $mag,
+                'similarity' => $sim
+            ];
+
+            $results[] = $result;
+        }
+
+
+
+        // Close the statement
+        $statement->close();
+
+            return $results;
+        }
+
+    
 
     /**
      * Normalize a vector
