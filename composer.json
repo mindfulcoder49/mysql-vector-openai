@@ -3,7 +3,7 @@
   "description": "Perform vector operations natively on MySQL using openAI embeddings",
   "type": "library",
   "license": "MIT",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "authors": [
     {
       "name": "Allan Pichardo",
