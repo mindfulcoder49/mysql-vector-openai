@@ -2,8 +2,9 @@
 
 namespace MHz\MysqlVector;
 
-use KMeans\Space;
 
+use KMeans\Space;
+use Illuminate\Support\Facades\Log;
 
 class VectorTable
 {
@@ -73,6 +74,186 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
 
         return $this->binaryToHexadecimal($padded);
     }
+
+    private function cosineSimilarity(array $vectorA, array $vectorB): float
+    {
+        // Ensure both vectors are the same length
+        if (count($vectorA) !== count($vectorB)) {
+            return 0;
+        }
+    
+        $dotProduct = 0;
+        $magnitudeA = 0;
+        $magnitudeB = 0;
+    
+        // Calculate dot product and magnitudes of both vectors
+        for ($i = 0; $i < count($vectorA); $i++) {
+            $dotProduct += $vectorA[$i] * $vectorB[$i];
+            $magnitudeA += $vectorA[$i] * $vectorA[$i];
+            $magnitudeB += $vectorB[$i] * $vectorB[$i];
+        }
+    
+        // Prevent division by zero
+        if ($magnitudeA == 0 || $magnitudeB == 0) {
+            return 0;
+        }
+    
+        // Return cosine similarity
+        return $dotProduct / (sqrt($magnitudeA) * sqrt($magnitudeB));
+    }
+    
+
+    public function stagedSearch(array $vector, int $stages = 4, int $n = 50): array
+{
+    // Get the table name for the search
+    $tableName = $this->getVectorTableName();
+
+    // Normalize the input vector
+    $normalizedVector = $this->normalize($vector);
+    Log::info('Normalized input vector successfully.');
+
+    // Array to store bottom half results from each stage
+    $allBottomResults = [];
+
+    // Calculate the initial dimension and increment based on the number of stages
+    $dimension = count($normalizedVector);
+    $initialDimension = intdiv($dimension, $stages);
+    $increment = $initialDimension;
+
+    Log::info('Initial dimension and increment calculated', [
+        'dimension' => $dimension,
+        'stages' => $stages,
+        'initial_dimension' => $initialDimension,
+        'increment' => $increment
+    ]);
+
+    // SQL query to retrieve all vectors initially
+    $sql = "
+        SELECT id, vector, normalized_vector, magnitude
+        FROM $tableName
+    ";
+
+    // Prepare the query to get all vectors
+    $statement = $this->mysqli->prepare($sql);
+    if (!$statement) {
+        throw new \Exception($this->mysqli->error);
+    }
+
+    // Execute the query
+    $statement->execute();
+
+    // Bind the result variables for vector retrieval
+    $statement->bind_result($id, $v, $nv, $mag);
+
+    // Array to hold all vectors fetched from the database
+    $allVectors = [];
+
+    // Fetch all vectors and store them in the array
+    while ($statement->fetch()) {
+        $allVectors[] = [
+            'id' => $id,
+            'vector' => json_decode($v, true),
+            'normalized_vector' => json_decode($nv, true),
+            'magnitude' => $mag
+        ];
+    }
+
+    // Close the statement
+    $statement->close();
+
+    // Start with the initial number of dimensions
+    $currentDimension = $initialDimension;
+
+    // Continue until we’ve used all dimensions
+    while ($currentDimension <= $dimension) {
+        Log::info("Running search for dimension", ['dimension' => $currentDimension]);
+    
+        // Slice the input vector to the current number of dimensions
+        $partialVector = array_slice($vector, 0, $currentDimension); // Slice first
+        $normalizedPartialVector = $this->normalize($partialVector); // Normalize after slicing
+        Log::info('Normalized partial vector for the current dimension', ['dimension' => $currentDimension]);
+    
+        // Array to hold candidates from this stage
+        $currentCandidates = [];
+    
+        // Loop through all vectors fetched from the database
+        foreach ($allVectors as $vectorData) {
+            // Truncate the stored normalized vector to match the current dimension
+            $storedVector = array_slice($vectorData['vector'], 0, $currentDimension);
+            
+            // Normalize after slicing (if needed)
+            $storedNormalizedVector = $this->normalize($storedVector);
+    
+            // Calculate cosine similarity for the truncated and normalized vectors
+            $similarity = $this->cosineSimilarity($normalizedPartialVector, $storedNormalizedVector);
+    
+            // Store the candidate with similarity score
+            $currentCandidates[] = [
+                'id' => $vectorData['id'],
+                'vector' => $vectorData['vector'],
+                'normalized_vector' => $storedNormalizedVector,
+                'magnitude' => $vectorData['magnitude'],
+                'similarity' => $similarity,
+            ];
+        }
+
+        // Sort the candidates by similarity within this stage (higher scores first)
+        usort($currentCandidates, fn($a, $b) => $b['similarity'] <=> $a['similarity']);
+
+        // Retain only the top half for the next stage, and the bottom half for final results
+        $retainCount = max(1, intdiv(count($currentCandidates), 2));
+        $topHalf = array_slice($currentCandidates, 0, $retainCount);
+        $bottomHalf = array_slice($currentCandidates, $retainCount);
+
+        // Save the bottom half from this stage
+        $allBottomResults[] = $bottomHalf;
+
+        // Move the top half to the next stage for further refinement
+        $allVectors = $topHalf;
+
+        // Increment the dimension for the next stage
+        $currentDimension += $increment;
+
+        // Stop the loop if there are no more candidates to process in the top half
+        if (empty($allVectors)) {
+            break;
+        }
+    }
+
+    // Final array to hold all compiled results (only bottom half from each stage)
+    $compiledResults = [];
+
+    // Merge the final top half results (the ones that survived all stages)
+    foreach ($allVectors as $candidate) {
+        $compiledResults[] = $candidate;
+    }
+
+    //Compile all bottom results from each stage into a single array
+    foreach ($allBottomResults as $bottomSet) {
+        foreach ($bottomSet as $candidate) {
+            $compiledResults[] = $candidate;
+        }
+    }
+
+
+
+    // Limit the final results to the top N matches
+    $limitedResults = array_slice($compiledResults, 0, $n);
+
+    // Log the final number of candidates
+    Log::info('Returning final sorted candidates', ['total_candidates' => count($limitedResults)]);
+
+    // Return the limited sorted candidates array
+    return array_values($limitedResults);
+}
+
+
+
+
+
+
+    
+    
 
     private function binaryToHexadecimal(string $binaryString): string {
         $hex = '';
@@ -451,66 +632,72 @@ CREATE FUNCTION COSIM(v1 JSON, v2 JSON) RETURNS FLOAT DETERMINISTIC BEGIN DECLAR
         return $results;
     }
 
-    public function search(array $vector, int $n = 10): array {
+    public function search(array $vector, int $n = 10): array
+{
+    // Get the table name for the search
+    $tableName = $this->getVectorTableName();
 
+    // Normalize the input vector, making it ready for cosine similarity comparisons
+    $normalizedVector = $this->normalize($vector);
 
-        $tableName = $this->getVectorTableName();
+    // Log that normalization was successful (small, but mighty)
+    Log::info('Normalized input vector successfully.');
 
-        $normalizedVector = $this->normalize($vector);  // Normalize the input vector
+    // Query to retrieve all vectors from the database
+    $sql = "
+        SELECT id, vector, normalized_vector, magnitude
+        FROM $tableName
+    ";
 
+    // Prepare the SQL statement to fetch all vectors
+    $statement = $this->mysqli->prepare($sql);
+    if (!$statement) {
+        throw new \Exception($this->mysqli->error);
+    }
 
-        $normalizedVectorJson = json_encode($normalizedVector);  // Convert it to JSON
+    // Execute the SQL query
+    $statement->execute();
 
+    // Bind the result variables for vector retrieval
+    $statement->bind_result($id, $v, $nv, $mag);
 
-        // Query using cosine similarity (COSIM)
-        $sql = "
-            SELECT id, vector, normalized_vector, magnitude, COSIM(normalized_vector, ?) AS similarity
-            FROM $tableName
-            ORDER BY similarity DESC
-            LIMIT ?
-        ";
+    // Array to hold all vectors and their similarity scores
+    $allResults = [];
 
+    // Fetch each vector and calculate the cosine similarity
+    while ($statement->fetch()) {
+        $storedNormalizedVector = json_decode($nv, true);  // Decode stored normalized vector
+        $similarity = $this->cosineSimilarity($normalizedVector, $storedNormalizedVector);  // Calculate cosine similarity
 
-        // Prepare the SQL statement
-        $statement = $this->mysqli->prepare($sql);
-        
-        if (!$statement) {
-            $error = $this->mysqli->error;
-            throw new \Exception($error);
-        }
+        // Store the result
+        $allResults[] = [
+            'id' => $id,
+            'vector' => json_decode($v, true),  // Decode stored vector
+            'normalized_vector' => $storedNormalizedVector,
+            'magnitude' => $mag,
+            'similarity' => $similarity,
+        ];
+    }
 
+    // Close the statement
+    $statement->close();
 
+    // Sort all results by similarity in descending order
+    usort($allResults, fn($a, $b) => $b['similarity'] <=> $a['similarity']);
 
-        $statement->bind_param('si', $normalizedVectorJson, $n);
+    // Log how many results were found
+    Log::info('Total vectors found:', ['count' => count($allResults)]);
 
+    // Limit the final results to the top N
+    $limitedResults = array_slice($allResults, 0, $n);
 
-        $statement->execute();
+    // Log the final number of candidates returned
+    Log::info('Returning top N sorted candidates', ['topN' => count($limitedResults)]);
 
-        // Bind the result variables
-        $statement->bind_result($id, $v, $nv, $mag, $sim);
+    // Return the top N results
+    return $limitedResults;
+}
 
-
-        // Collect results
-        $results = [];
-        while ($statement->fetch()) {
-            $result = [
-                'id' => $id,
-                'vector' => json_decode($v, true),
-                'normalized_vector' => json_decode($nv, true),
-                'magnitude' => $mag,
-                'similarity' => $sim
-            ];
-
-            $results[] = $result;
-        }
-
-
-
-        // Close the statement
-        $statement->close();
-
-            return $results;
-        }
 
     
 
